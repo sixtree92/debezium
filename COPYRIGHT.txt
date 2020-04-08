@@ -5,6 +5,7 @@ Adrian Kreuziger
 Akshath Patkar
 Alex Mansell
 Alex Soto
+Alexander Iskuskov
 Alexander Kovryga
 Alexander Schwartz
 Amit Sela
@@ -52,9 +53,11 @@ Eero Koplimets
 Emrul Islam
 Eric S. Kreiseir
 Ewen Cheslack-Postava
+Fabian Aussems
 Fabio Cantarini
 Felix Eckhardt
 Fintan Bolton
+Frank Mormino
 Gagan Agrawal
 Grant Cooksey
 Guillaume Rosauro
@@ -115,6 +118,7 @@ Mincong Huang
 Moira Tagle
 Muhammad Sufyian
 Navdeep Agarwal
+Nayana Hettiarachchi
 Nikhil Benesch
 Olavi Mustanoja
 Omar Al-Safi
@@ -136,6 +140,7 @@ Raúl Tovar
 Renato Mefi
 Roman Kuchar
 Sagar Rao
+Sahan Dilshan
 René Kerner
 Rich O'Connell
 Robert Coup

@@ -313,6 +313,14 @@ endif::cdc-product[]
 
 A separate process would then periodically update the table (either inserting a new event or updating the same row all over).
 PostgreSQL then will invoke {prodname} which will confirm the latest LSN and allow the database to reclaim the WAL space.
+This task can be automated by means of the `heartbeat.action.query` connector opton (see below).
+
+[TIP]
+====
+For users on AWS RDS with Postgres, a similar situation to the third cause may occur on an idle environment,
+since AWS RDS makes writes to its own system tables not visible to the useres on a frequent basis (5 minutes).
+Again regularly emitting events will solve the problem.
+====
 
 [[how-the-postgresql-connector-works]]
 === How the PostgreSQL connector works
@@ -352,7 +360,7 @@ The full API of the interface can be seen here:
 
 [source,java,indent=0,subs="+attributes"]
 ----
-**
+/**
  * This interface is used to determine details about the snapshot process:
  *
  * Namely:
@@ -523,7 +531,7 @@ All data change events produced by the PostgreSQL connector have a key and a val
 
 [NOTE]
 ====
-Starting with Kafka 0.10, Kafka can optionally record with the message key and value the http://kafka.apache.org/documentation.html#upgrade_10_performance_impact[_timestamp_] at which the message was created (recorded by the producer) or written to the log by Kafka.
+Starting with Kafka 0.10, Kafka can optionally record with the message key and value the {link-kafka-docs}.html#upgrade_10_performance_impact[_timestamp_] at which the message was created (recorded by the producer) or written to the log by Kafka.
 ====
 
 [WARNING]
@@ -871,6 +879,19 @@ There are several things we can learn by just looking at this `payload` section.
 ====
 When the columns for a row's primary/unique key are updated, the value of the row's key has changed so {prodname} will output _three_ events: a `DELETE` event and link:#tombstone-events[tombstone event] with the old key for the row, followed by an `INSERT` event with the new key for the row.
 ====
+
+===== Primary Key Update Header
+
+When there is an update event that's changing the row's primary key field/s, also known
+as a primary key change, Debezium will in that case send a DELETE event for the old key
+and an INSERT event for the new (updated) key.
+
+The DELETE event produces a Kafka message which has a message header `__debezium.newkey`
+and the value is the new primary key.
+
+The INSERT event produces a Kafka message which has a message header `__debezium.oldkey`
+and the value is the previous (old) primary key of the updated row.
+
 
 [[delete-events]]
 ===== Delete Events
@@ -1528,7 +1549,7 @@ For consistent toasted values handling we recommend to
 == Deploying the PostgreSQL Connector
 
 ifndef::cdc-product[]
-If you've already installed https://zookeeper.apache.org[Zookeeper], http://kafka.apache.org/[Kafka], and http://kafka.apache.org/documentation.html#connect[Kafka Connect], then using Debezium's PostgreSQL connector is easy. Simply download the https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/{debezium-version}/debezium-connector-postgres-{debezium-version}-plugin.tar.gz[connector's plugin archive], extract the JARs into your Kafka Connect environment, and add the directory with the JARs to http://kafka.apache.org/documentation/#connectconfigs[Kafka Connect's plugin.path]. Restart your Kafka Connect process to pick up the new JARs.
+If you've already installed https://zookeeper.apache.org[Zookeeper], http://kafka.apache.org/[Kafka], and {link-kafka-docs}.html#connect[Kafka Connect], then using Debezium's PostgreSQL connector is easy. Simply download the https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/{debezium-version}/debezium-connector-postgres-{debezium-version}-plugin.tar.gz[connector's plugin archive], extract the JARs into your Kafka Connect environment, and add the directory with the JARs to {link-kafka-docs}/#connectconfigs[Kafka Connect's plugin.path]. Restart your Kafka Connect process to pick up the new JARs.
 endif::cdc-product[]
 
 ifdef::cdc-product[]
@@ -1536,7 +1557,7 @@ Installing the PostgreSQL connector is a simple process whereby you only need to
 
 .Prerequisites
 
-* You have link:https://zookeeper.apache.org/[Zookeeper], link:http://kafka.apache.org/[Kafka], and link:http://kafka.apache.org/documentation.html#connect[Kafka Connect] installed.
+* You have link:https://zookeeper.apache.org/[Zookeeper], link:http://kafka.apache.org/[Kafka], and link:{link-kafka-docs}.html#connect[Kafka Connect] installed.
 * You have PostgreSQL installed and setup.
 
 .Procedure
@@ -1615,140 +1636,28 @@ This configuration can be sent via POST to a running Kafka Connect service, whic
 [[monitoring]]
 === Monitoring
 
-Kafka, Zookeeper, and Kafka Connect all have built-in support for JMX metrics. The PostgreSQL connector also publishes a number of metrics about the connector's activities that can be monitored through JMX. The connector has two types of metrics. Snapshot metrics help you monitor the snapshot activity and are available when the connector is performing a snapshot. Streaming metrics help you monitor the progress and activity while the connector processes the logical replication stream.
+The {prodname} PostgreSQL connector has two metric types in addition to the built-in support for JMX metrics that Zookeeper, Kafka, and Kafka Connect have.
+
+* <<snapshot-metrics, snapshot metrics>>; for monitoring the connector when performing snapshots
+* <<streaming-metrics, streaming metrics>>; for monitoring the connector when processing change events via logical decoding
+
+Please refer to the xref:operations/monitoring.adoc[monitoring documentation] for details of how to expose these metrics via JMX.
 
 [[monitoring-snapshots]]
 [[snapshot-metrics]]
 ==== Snapshot Metrics
 
-===== *MBean: debezium.postgres:type=connector-metrics,context=snapshot,server=_<database.server.name>_*
+The *MBean* is `debezium.postgres:type=connector-metrics,context=snapshot,server=_<database.server.name>_`.
 
-[cols="30%a,10%a,60%a",options="header"]
-|=======================
-|Attribute Name
-|Type
-|Description
-
-|`LastEvent`
-|`string`
-|The last snapshot event that the connector has read.
-
-|`MilliSecondsSinceLastEvent`
-|`long`
-|The number of milliseconds since the connector has read and processed the most recent event.
-
-|`TotalNumberOfEventsSeen`
-|`long`
-|The total number of events that this connector has seen since last started or reset.
-
-|`NumberOfEventsFiltered`
-|`long`
-|The number of events that have been filtered by whitelist or blacklist filtering rules configured on the connector.
-
-|`MonitoredTables`
-|`string[]`
-|The list of tables that are monitored by the connector.
-
-|`QueueTotalCapcity`
-|`int`
-|The length of the queue used to pass events between the snapshotter and the main Kafka Connect loop.
-
-|`QueueRemainingCapcity`
-|`int`
-|The free capacity of the queue used to pass events between the snapshotter and the main Kafka Connect loop.
-
-|`TotalTableCount`
-|`int`
-|The total number of tables that are being included in the snapshot.
-
-|`RemainingTableCount`
-|`int`
-|The number of tables that the snapshot has yet to copy.
-
-|`SnapshotRunning`
-|`boolean`
-|Whether the snapshot was started.
-
-|`SnapshotAborted`
-|`boolean`
-|Whether the snapshot was aborted.
-
-|`SnapshotCompleted`
-|`boolean`
-|Whether the snapshot completed.
-
-|`SnapshotDurationInSeconds`
-|`long`
-|The total number of seconds that the snapshot has taken so far, even if not complete.
-
-|`RowsScanned`
-|`Map<String, Long>`
-|Map containing the number of rows scanned for each table in the snapshot. Tables are incrementally added to the Map during processing. Updates every 10,000 rows scanned and upon completing a table.
-
-|=======================
-
+include::../modules/cdc-all-connectors/r_connector-monitoring-snapshot-metrics.adoc[leveloffset=+1]
 
 [[monitoring-streaming]]
 [[streaming-metrics]]
 ==== Streaming Metrics
 
-===== *MBean: debezium.postres:type=connector-metrics,context=streaming,server=_<database.server.name>_*
+The *MBean* is `debezium.postres:type=connector-metrics,context=streaming,server=_<database.server.name>_`.
 
-[cols="30%a,10%a,60%a",options="header"]
-|=======================
-|Attribute Name
-|Type
-|Description
-
-|`LastEvent`
-|`string`
-|The last streaming event that the connector has read.
-
-|`MilliSecondsSinceLastEvent`
-|`long`
-|The number of milliseconds since the connector has read and processed the most recent event.
-
-|`TotalNumberOfEventsSeen`
-|`long`
-|The total number of events that this connector has seen since last started or reset.
-
-|`NumberOfEventsFiltered`
-|`long`
-|The number of events that have been filtered by whitelist or blacklist filtering rules configured on the connector.
-
-|`MonitoredTables`
-|`string[]`
-|The list of tables that are monitored by the connector.
-
-|`QueueTotalCapcity`
-|`int`
-|The length of the queue used to pass events between the streamer and the main Kafka Connect loop.
-
-|`QueueRemainingCapcity`
-|`int`
-|The free capacity of the queue used to pass events between the streamer and the main Kafka Connect loop.
-
-|`Connected`
-|`boolean`
-|Flag that denotes whether the connector is currently connected to the database server.
-
-|`MilliSecondsBehindSource`
-|`long`
-|The number of milliseconds between the last change event's timestamp and the connector processing it. The values will incorporate any differences between the clocks on the machines where the database server and the connector are running.
-
-|`NumberOfCommittedTransactions`
-|`long`
-|The number of processed transactions that were committed.
-
-|`SourceEventPosition`
-|`map<string, string>`
-|The coordinates of the last received event.
-
-|`LastTransactionId`
-|`string`
-|Transaction identifier of the last processed transaction.
-
-|=======================
+include::../modules/cdc-all-connectors/r_connector-monitoring-streaming-metrics.adoc[leveloffset=+1]
 
 [[connector-properties]]
 === Connector Properties
@@ -1780,7 +1689,7 @@ ifdef::cdc-product[]
 The only supported value is `pgoutput`.
 endif::cdc-product[]
 ifndef::cdc-product[]
-Supported values are `decoderbufs`, `wal2json`, `wal2json_rds`, `wal2json_streaming` (added in 0.8.0.Beta1), `wal2json_rds_streaming` (added in 0.8.0.Beta1) and `pgoutput` (added in 0.10.0.Beta3)
+Supported values are `decoderbufs`, `wal2json`, `wal2json_rds`, `wal2json_streaming`, `wal2json_rds_streaming` and `pgoutput`
 endif::cdc-product[]
 
 When the processed transactions are very large it is possible that the `JSON` batch event with all changes in the transaction will not fit into the hard-coded memory buffer of size 1 GB.
@@ -1896,11 +1805,15 @@ Only alphanumeric characters and underscores should be used.
 When `true` the delete operations are represented by a delete event and a subsequent tombstone event. When `false` only a delete event is sent. +
 Emitting the tombstone event (the default behavior) allows Kafka to completely delete all events pertaining to the given key once the source record got deleted.
 
+|`column.truncate.to._length_.chars`
+|_n/a_
+|An optional comma-separated list of regular expressions that match the fully-qualified names of character-based columns whose values should be truncated in the change event message values if the field values are longer than the specified number of characters. Multiple properties with different lengths can be used in a single configuration, although in each the length must be a positive integer. Fully-qualified names for columns are of the form _databaseName_._tableName_._columnName_, or _databaseName_._schemaName_._tableName_._columnName_.
+
 |`column.mask.with._length_.chars`
 |_n/a_
 |An optional comma-separated list of regular expressions that match the fully-qualified names of character-based columns whose values should be replaced in the change event message values with a field value consisting of the specified number of asterisk (`*`) characters. Multiple properties with different lengths can be used in a single configuration, although in each the length must be a positive integer or zero. Fully-qualified names for columns are of the form _databaseName_._tableName_._columnName_, or _databaseName_._schemaName_._tableName_._columnName_.
 
-|`column.propagate.source.type` 0.8.0 and later
+|`column.propagate.source.type`
 |_n/a_
 |An optional comma-separated list of regular expressions that match the fully-qualified names of columns whose original type and length should be added as a parameter to the corresponding field schemas in the emitted change messages.
 The schema parameters `pass:[_]pass:[_]debezium.source.column.type`, `pass:[_]pass:[_]debezium.source.column.length` and `pass:[_]pass:[_]debezium.source.column.scale` will be used to propagate the original type name and length (for variable-width types), respectively.
@@ -1943,7 +1856,7 @@ Finally, if set to *custom* then the user must also set `snapshot.custom.class` 
 endif::cdc-product[]
 |`snapshot.lock.timeout.ms`
 |`10000`
-|Positive integer value that specifies the maximum amount of time (in milliseconds) to wait to obtain table locks when performing a snapshot. If table locks cannot be acquired in this time interval, the snapshot will fail See link:#snapshots[snapshots]
+|Positive integer value that specifies the maximum amount of time (in milliseconds) to wait to obtain table locks when performing a snapshot. If table locks cannot be acquired in this time interval, the snapshot will fail. See link:#snapshots[snapshots]
 
 |`snapshot.select.statement.overrides`
 |
@@ -2077,7 +1990,7 @@ See link:#transaction-metadata[Transaction Metadata] for additional details.
 
 The connector also supports _pass-through_ configuration properties that are used when creating the Kafka producer and consumer.
 
-Be sure to consult the http://kafka.apache.org/documentation.html[Kafka documentation] for all of the configuration properties for Kafka producers and consumers. (The PostgreSQL connector does use the http://kafka.apache.org/documentation.html#newconsumerconfigs[new consumer].)
+Be sure to consult the {link-kafka-docs}.html[Kafka documentation] for all of the configuration properties for Kafka producers and consumers. (The PostgreSQL connector does use the {link-kafka-docs}.html#newconsumerconfigs[new consumer].)
 
 [[when-things-go-wrong]]
 == PostgreSQL common issues

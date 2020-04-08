@@ -5,6 +5,8 @@
  */
 package io.debezium.connector.common;
 
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +27,7 @@ import io.debezium.pipeline.ChangeEventSourceCoordinator;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.util.Clock;
 import io.debezium.util.ElapsedTimeStrategy;
+import io.debezium.util.Metronome;
 
 /**
  * Base class for Debezium's CDC {@link SourceTask} implementations. Provides functionality common to all connectors,
@@ -117,6 +120,10 @@ public abstract class BaseSourceTask extends SourceTask {
 
         // in backoff period after a retriable exception
         if (!started) {
+            // WorkerSourceTask calls us immediately after we return the empty list.
+            // This turns into a throttling so we need to make a pause before we return
+            // the control back.
+            Metronome.parker(Duration.of(2, ChronoUnit.SECONDS), Clock.SYSTEM).pause();
             return Collections.emptyList();
         }
 
@@ -195,6 +202,7 @@ public abstract class BaseSourceTask extends SourceTask {
 
             if (restart && restartDelay == null) {
                 restartDelay = ElapsedTimeStrategy.constant(Clock.system(), 10_000);
+                restartDelay.hasElapsed();
             }
         }
         finally {

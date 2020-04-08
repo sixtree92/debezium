@@ -12,6 +12,7 @@ import java.util.function.Supplier;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
+import org.apache.kafka.connect.header.ConnectHeaders;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -123,11 +124,14 @@ public class EventDispatcher<T extends DataCollectionId> {
         changeRecordEmitter.emitChangeRecords(dataCollectionSchema, new Receiver() {
 
             @Override
-            public void changeRecord(DataCollectionSchema schema, Operation operation, Object key, Struct value,
-                                     OffsetContext offset)
+            public void changeRecord(DataCollectionSchema schema,
+                                     Operation operation,
+                                     Object key, Struct value,
+                                     OffsetContext offset,
+                                     ConnectHeaders headers)
                     throws InterruptedException {
                 eventListener.onEvent(dataCollectionSchema.id(), offset, key, value);
-                receiver.changeRecord(dataCollectionSchema, operation, key, value, offset);
+                receiver.changeRecord(dataCollectionSchema, operation, key, value, offset, headers);
             }
         });
     }
@@ -167,12 +171,15 @@ public class EventDispatcher<T extends DataCollectionId> {
                 changeRecordEmitter.emitChangeRecords(dataCollectionSchema, new Receiver() {
 
                     @Override
-                    public void changeRecord(DataCollectionSchema schema, Operation operation, Object key, Struct value,
-                                             OffsetContext offset)
+                    public void changeRecord(DataCollectionSchema schema,
+                                             Operation operation,
+                                             Object key, Struct value,
+                                             OffsetContext offset,
+                                             ConnectHeaders headers)
                             throws InterruptedException {
                         transactionMonitor.dataEvent(dataCollectionId, offset, key, value);
                         eventListener.onEvent(dataCollectionId, offset, key, value);
-                        streamingReceiver.changeRecord(schema, operation, key, value, offset);
+                        streamingReceiver.changeRecord(schema, operation, key, value, offset, headers);
                     }
                 });
                 handled = true;
@@ -268,8 +275,13 @@ public class EventDispatcher<T extends DataCollectionId> {
     private final class StreamingChangeRecordReceiver implements ChangeRecordEmitter.Receiver {
 
         @Override
-        public void changeRecord(DataCollectionSchema dataCollectionSchema, Operation operation, Object key, Struct value, OffsetContext offsetContext)
+        public void changeRecord(DataCollectionSchema dataCollectionSchema,
+                                 Operation operation,
+                                 Object key, Struct value,
+                                 OffsetContext offsetContext,
+                                 ConnectHeaders headers)
                 throws InterruptedException {
+
             Objects.requireNonNull(value, "value must not be null");
 
             LOGGER.trace("Received change record for {} operation on key {}", operation, key);
@@ -277,8 +289,13 @@ public class EventDispatcher<T extends DataCollectionId> {
             Schema keySchema = dataCollectionSchema.keySchema();
             String topicName = topicSelector.topicNameFor((T) dataCollectionSchema.id());
 
-            SourceRecord record = new SourceRecord(offsetContext.getPartition(), offsetContext.getOffset(),
-                    topicName, null, keySchema, key, dataCollectionSchema.getEnvelopeSchema().schema(), value);
+            SourceRecord record = new SourceRecord(offsetContext.getPartition(),
+                    offsetContext.getOffset(), topicName, null,
+                    keySchema, key,
+                    dataCollectionSchema.getEnvelopeSchema().schema(),
+                    value,
+                    null,
+                    headers);
 
             queue.enqueue(changeEventCreator.createDataChangeEvent(record));
 
@@ -290,7 +307,8 @@ public class EventDispatcher<T extends DataCollectionId> {
                         record.key(),
                         null, // value schema
                         null, // value
-                        record.timestamp());
+                        record.timestamp(),
+                        record.headers());
 
                 queue.enqueue(changeEventCreator.createDataChangeEvent(tombStone));
             }
@@ -302,7 +320,11 @@ public class EventDispatcher<T extends DataCollectionId> {
         private Supplier<DataChangeEvent> bufferedEvent;
 
         @Override
-        public void changeRecord(DataCollectionSchema dataCollectionSchema, Operation operation, Object key, Struct value, OffsetContext offsetContext)
+        public void changeRecord(DataCollectionSchema dataCollectionSchema,
+                                 Operation operation,
+                                 Object key, Struct value,
+                                 OffsetContext offsetContext,
+                                 ConnectHeaders headers)
                 throws InterruptedException {
             Objects.requireNonNull(value, "value must not be null");
 
@@ -317,8 +339,13 @@ public class EventDispatcher<T extends DataCollectionId> {
 
             // the record is produced lazily, so to have the correct offset as per the pre/post completion callbacks
             bufferedEvent = () -> {
-                SourceRecord record = new SourceRecord(offsetContext.getPartition(), offsetContext.getOffset(),
-                        topicName, null, keySchema, key, dataCollectionSchema.getEnvelopeSchema().schema(), value);
+                SourceRecord record = new SourceRecord(
+                        offsetContext.getPartition(),
+                        offsetContext.getOffset(),
+                        topicName, null,
+                        keySchema, key,
+                        dataCollectionSchema.getEnvelopeSchema().schema(), value,
+                        null, headers);
                 return changeEventCreator.createDataChangeEvent(record);
             };
         }

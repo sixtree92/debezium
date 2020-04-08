@@ -32,12 +32,14 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.StreamSupport;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.header.Header;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.storage.MemoryOffsetBackingStore;
 import org.awaitility.Awaitility;
@@ -75,6 +77,7 @@ import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.junit.ConditionalFail;
 import io.debezium.junit.ShouldFailWhen;
 import io.debezium.junit.logging.LogInterceptor;
+import io.debezium.relational.RelationalChangeRecordEmitter;
 import io.debezium.relational.RelationalDatabaseConnectorConfig.DecimalHandlingMode;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
@@ -686,6 +689,20 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                 Collections.singletonList(new SchemaAndValueField("modtype", SchemaBuilder.OPTIONAL_INT16_SCHEMA, (short) 2)), updatedRecord, Envelope.FieldName.AFTER);
     }
 
+    private Header getPKUpdateNewKeyHeader(SourceRecord record) {
+        return this.getHeaderField(record, RelationalChangeRecordEmitter.PK_UPDATE_NEWKEY_FIELD);
+    }
+
+    private Header getPKUpdateOldKeyHeader(SourceRecord record) {
+        return this.getHeaderField(record, RelationalChangeRecordEmitter.PK_UPDATE_OLDKEY_FIELD);
+    }
+
+    private Header getHeaderField(SourceRecord record, String fieldName) {
+        return StreamSupport.stream(record.headers().spliterator(), false)
+                .filter(header -> fieldName.equals(header.key()))
+                .collect(Collectors.toList()).get(0);
+    }
+
     @Test
     public void shouldReceiveChangesForUpdatesWithPKChanges() throws Exception {
         startConnector();
@@ -699,6 +716,9 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         assertEquals(topicName, deleteRecord.topic());
         VerifyRecord.isValidDelete(deleteRecord, PK_FIELD, 1);
 
+        Header keyPKUpdateHeader = getPKUpdateNewKeyHeader(deleteRecord);
+        assertEquals(Integer.valueOf(2), ((Struct) keyPKUpdateHeader.value()).getInt32("pk"));
+
         // followed by a tombstone of the old pk
         SourceRecord tombstoneRecord = consumer.remove();
         assertEquals(topicName, tombstoneRecord.topic());
@@ -708,6 +728,9 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         SourceRecord insertRecord = consumer.remove();
         assertEquals(topicName, insertRecord.topic());
         VerifyRecord.isValidInsert(insertRecord, PK_FIELD, 2);
+
+        keyPKUpdateHeader = getPKUpdateOldKeyHeader(insertRecord);
+        assertEquals(Integer.valueOf(1), ((Struct) keyPKUpdateHeader.value()).getInt32("pk"));
     }
 
     @Test
@@ -727,10 +750,16 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         assertEquals(topicName, deleteRecord.topic());
         VerifyRecord.isValidDelete(deleteRecord, PK_FIELD, 1);
 
+        Header keyPKUpdateHeader = getPKUpdateNewKeyHeader(deleteRecord);
+        assertEquals(Integer.valueOf(2), ((Struct) keyPKUpdateHeader.value()).getInt32("pk"));
+
         // followed by insert of the new value
         SourceRecord insertRecord = consumer.remove();
         assertEquals(topicName, insertRecord.topic());
         VerifyRecord.isValidInsert(insertRecord, PK_FIELD, 2);
+
+        keyPKUpdateHeader = getPKUpdateOldKeyHeader(insertRecord);
+        assertEquals(Integer.valueOf(1), ((Struct) keyPKUpdateHeader.value()).getInt32("pk"));
     }
 
     @Test
@@ -1644,12 +1673,16 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                 .with(PostgresConnectorConfig.SNAPSHOT_MODE, PostgresConnectorConfig.SnapshotMode.NEVER)
                 .with(EmbeddedEngine.OFFSET_STORAGE, MemoryOffsetBackingStore.class), false);
 
-        consumer.expects(3);
+        final boolean streaming = TestHelper.decoderPlugin().name().toLowerCase().endsWith("streaming");
+        consumer.expects(streaming ? 2 : 3);
         consumer.await(TestHelper.waitTimeForRecords() * 5, TimeUnit.SECONDS);
 
         // After loss of offset and not doing snapshot we always stream the first record available in replication slot
         // even if we have seen it as it is not possible to make a difference from plain snapshot never mode
-        Assertions.assertThat(((Struct) consumer.remove().value()).getStruct("after").getString("text")).isEqualTo("insert2");
+        // In case of streaming wal2json the LSN flush is timed differently due to the last non-functional chunk processing
+        if (!streaming) {
+            Assertions.assertThat(((Struct) consumer.remove().value()).getStruct("after").getString("text")).isEqualTo("insert2");
+        }
         Assertions.assertThat(((Struct) consumer.remove().value()).getStruct("after").getString("text")).isEqualTo("insert3");
         Assertions.assertThat(((Struct) consumer.remove().value()).getStruct("after").getString("text")).isEqualTo("insert4");
 
@@ -2223,12 +2256,6 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     @Test()
     @FixFor("DBZ-1815")
     public void testHeartbeatActionQueryExecuted() throws Exception {
-        // A low heartbeat interval should make sure that a heartbeat message is emitted at least once during the test.
-        startConnector(config -> config
-                .with(Heartbeat.HEARTBEAT_INTERVAL, "100")
-                .with(DatabaseHeartbeatImpl.HEARTBEAT_ACTION_QUERY,
-                        "INSERT INTO test_heartbeat_table (text) VALUES ('test_heartbeat');"));
-
         TestHelper.execute(
                 "DROP TABLE IF EXISTS test_table;" +
                         "CREATE TABLE test_table (id SERIAL, text TEXT);" +
@@ -2237,6 +2264,12 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         TestHelper.execute(
                 "DROP TABLE IF EXISTS test_heartbeat_table;" +
                         "CREATE TABLE test_heartbeat_table (text TEXT);");
+
+        // A low heartbeat interval should make sure that a heartbeat message is emitted at least once during the test.
+        startConnector(config -> config
+                .with(Heartbeat.HEARTBEAT_INTERVAL, "100")
+                .with(DatabaseHeartbeatImpl.HEARTBEAT_ACTION_QUERY,
+                        "INSERT INTO test_heartbeat_table (text) VALUES ('test_heartbeat');"));
 
         // Expecting 1 data change
         Awaitility.await().atMost(TestHelper.waitTimeForRecords(), TimeUnit.SECONDS).until(() -> {
